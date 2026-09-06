@@ -32,7 +32,7 @@
 
 local WIDTH        = 10    -- columns (sideways, to the turtle's right)
 local LENGTH       = 10    -- rows (forward, the way the turtle starts facing)
-local PATROL_DELAY = 60    -- seconds to wait between full passes
+local PATROL_DELAY = 3600  -- seconds to wait between full passes (1 hour)
 local FUEL_MIN     = 200   -- top up when fuel drops below this
 local FUEL_MARGIN  = 16    -- keep at least this much on top of the trip home
 local MAX_STUCK    = 3     -- give up on a cell after this many failed moves
