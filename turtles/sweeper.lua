@@ -1,5 +1,5 @@
 --[[
-  10x10-picker-upper.lua -- ComputerCraft / CC:Tweaked item sweeper turtle
+  sweeper.lua -- ComputerCraft / CC:Tweaked item sweeper turtle
 
   Patrols a WIDTH x LENGTH area on a single layer, vacuuming up loose item
   drops. Returns to a chest behind its start position when the inventory
@@ -13,14 +13,17 @@
   SETUP
     - Place the turtle at a corner of the area, standing on the surface you
       want swept, facing along the first row.
-    - Leave the block directly above the turtle clear; it hovers to work.
+    - Leave the layer ABOVE the area clear if you can; the turtle hovers so
+      that suckDown() can clear the block it is standing on. Under a low roof
+      it drops to ground level automatically and sweeps sideways instead,
+      which still works but misses some cells.
     - Place a chest DIRECTLY BEHIND the turtle, on the turtle's own layer.
     - The turtle's starting block is cell (0,0) and is included in the sweep.
     - Give it some coal or charcoal; it will refuel itself and will never
       dump fuel into the chest.
 
   RUN
-    10x10-picker-upper
+    sweeper
 ]]
 
 -- ============================================================
@@ -283,6 +286,18 @@ end
 -- SWEEP
 -- ============================================================
 
+-- Hovering one block up is what lets suckDown() clear the cell we are
+-- standing on. A low roof (mob farm floors, 2-high rooms) makes that
+-- impossible, so fall back to ground level and sweep sideways rather than
+-- refusing to work and reporting every single cell as blocked.
+local function pickCruiseAlt()
+  if goToAlt(SWEEP_ALT) then return SWEEP_ALT end
+  goToAlt(0)
+  print("! No headroom above me - sweeping at ground level.")
+  print("  Coverage will be partial. Clear the layer above for a full sweep.")
+  return 0
+end
+
 -- Serpentine cell order: down one column, up the next.
 local function buildPath()
   local cells = {}
@@ -300,9 +315,9 @@ local function buildPath()
   return cells
 end
 
-local function chestRun(resume)
+local function chestRun(resume, cruise)
   print("  Inventory full - returning to chest")
-  if not navigateTo(0, 0, SWEEP_ALT) then
+  if not navigateTo(0, 0, cruise) then
     print("  ! Could not reach home. Stopping.")
     return false
   end
@@ -318,14 +333,14 @@ local function chestRun(resume)
   end
 
   refuelIfNeeded()
-  if resume and not navigateTo(resume.x, resume.y, SWEEP_ALT) then
+  if resume and not navigateTo(resume.x, resume.y, cruise) then
     print("  ! Could not return to " .. resume.x .. "," .. resume.y)
     return false
   end
   return true
 end
 
-local function doPass()
+local function doPass(cruise)
   local cells   = buildPath()
   local skipped = 0
   local i       = 1
@@ -334,22 +349,28 @@ local function doPass()
     refuelIfNeeded()
     if not fuelOk() then
       print("  ! Fuel too low to keep going. Heading home.")
-      navigateTo(0, 0, SWEEP_ALT)
+      navigateTo(0, 0, cruise)
       return false
     end
 
     local cell = cells[i]
-    if navigateTo(cell.x, cell.y, SWEEP_ALT) and pos.z == SWEEP_ALT then
+    if navigateTo(cell.x, cell.y, cruise) then
+      -- Sweep from wherever we actually ended up. If a local overhang pushed
+      -- us below cruising height we still get the sideways sucks.
       sweepCell()
     else
-      print("  ~ Skipped cell " .. cell.x .. "," .. cell.y .. " (blocked)")
       skipped = skipped + 1
+      if skipped <= 3 then
+        print("  ~ Skipped cell " .. cell.x .. "," .. cell.y .. " (blocked)")
+      elseif skipped == 4 then
+        print("  ~ ...more blocked cells, suppressing further notices")
+      end
     end
 
     i = i + 1
 
     if freeSlots() == 0 and i <= #cells then
-      if not chestRun(cells[i]) then return false end
+      if not chestRun(cells[i], cruise) then return false end
     end
   end
 
@@ -373,14 +394,15 @@ local function main()
   print("")
 
   refuelIfNeeded()
+  local cruise = pickCruiseAlt()
 
   local passNum = 1
   while true do
     print("Pass " .. passNum .. " starting...")
 
-    local ok = doPass()
+    local ok = doPass(cruise)
 
-    if not navigateTo(0, 0, SWEEP_ALT) then
+    if not navigateTo(0, 0, cruise) then
       print("! Lost - could not get home. Halting.")
       return
     end
