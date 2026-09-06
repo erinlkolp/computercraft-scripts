@@ -22,7 +22,7 @@ fleet. We ask only that you tell us what we got wrong.
 |---|---|
 | Programs | 2 |
 | External dependencies | 0 |
-| Tests | 13, all passing |
+| Tests | 25, all passing |
 | Blocks dug outside the work area | 0 |
 
 ## Requirements
@@ -125,20 +125,31 @@ wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/head
 ## Tests
 
 `test/fake_turtle.lua` stubs the CC turtle API over a toy voxel world, so the
-programs can be exercised on a workstation without a server. It models the
-awkward parts faithfully, including the CC quirk where `turtle.drop()` with
-nothing in front throws your inventory on the floor and reports success.
+programs can be exercised on a workstation without a server. It carries blocks,
+loose item entities, and containers, and it models the awkward parts
+faithfully — including the CC quirk where `turtle.drop()` with nothing in
+front throws your inventory on the floor and reports success.
 
 From the repository root:
 
 ```
-lua test/flattener_test.lua
+lua test/flattener_test.lua    # 13 cases
+lua test/sweeper_test.lua      # 12 cases
 ```
 
-Thirteen cases, covering coverage, containment, and the failure modes that
-cost real dirt: nothing dug below the start layer, nothing dug outside the
-footprint, the chest never mined, nothing scattered on the ground, and a
-clean halt instead of a livelock when the chest fills.
+Twenty-five cases between them, covering coverage, containment, and the
+failure modes that cost real dirt: nothing dug below the start layer, nothing
+dug outside the footprint, the chest never mined, fuel never posted into the
+chest, nothing scattered on the ground, and a clean halt instead of a livelock
+when the chest fills.
+
+The sweeper patrols for ever by design, so its suite caps each run with the
+harness's `sleepLimit`: the script is cut loose the moment it settles in for
+its first patrol delay, which is exactly one completed pass.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE). Run them on your own fleet.
 
 ## Contributing
 
@@ -162,8 +173,7 @@ We will tell you honestly whether it is soil science or a landscaping problem.
 
 <sub>**Big Money, Big Women, Big Fun™**</sub>
 
-<sub>© 2026 SipsCo. All rights reserved. No licence file is currently committed
-to this repository; contact R&D before redistributing. ComputerCraft and
+<sub>© 2026 SipsCo. Source released under the MIT Licence. ComputerCraft and
 CC:Tweaked are the work of their respective authors. Minecraft is a trademark
 of Mojang Studios; SipsCo is not affiliated with or endorsed by Mojang
 Studios.</sub>

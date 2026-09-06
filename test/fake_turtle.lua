@@ -5,6 +5,14 @@
   Coordinates match the scripts' own frame:
     x = right of start facing, y = forward, z = up.
   The turtle starts at (0,0,0) facing 0 (+y).
+
+  The world holds loose item entities as well as blocks, so suck() has
+  something to pick up. Items sit in a pile at a coordinate, do not block
+  movement, and are handed over one stack per suck() the way CC does it.
+
+  Scripts that patrol forever (sweeper) can be stopped cleanly with the
+  sleepLimit option: the run ends the moment the script settles in for its
+  nth patrol delay. Short retry backoffs do not count.
 ]]
 
 local FakeTurtle = {}
@@ -30,13 +38,20 @@ function FakeTurtle.new(opts)
   self.inv       = {}                       -- [1..16] = {name=, count=}
   self.selected  = 1
   self.containers = {}                      -- ["x,y,z"] = {items={}, cap=}
+  self.items     = {}                       -- ["x,y,z"] = { {name=,count=}, ... }
   self.scattered = {}                       -- items dropped on the floor
   self.output    = {}
   self.minDigZ   = math.huge                -- lowest layer any dig landed on
   self.ops       = 0
   self.opLimit   = opts.opLimit or 500000
+  self.longSleeps = 0
+  self.sleepLimit = opts.sleepLimit         -- nil = let it run forever
   return self
 end
+
+-- Raised to unwind a script that would otherwise patrol for ever. run()
+-- recognises it and reports a clean finish.
+FakeTurtle.STOP = "fake_turtle: stopped at sleep limit"
 
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
@@ -67,6 +82,68 @@ end
 
 function FakeTurtle:chestAt(x, y, z)
   return self.containers[key(x, y, z)]
+end
+
+-- ---------- loose items on the ground ----------
+
+-- Litter for a sweeper to find. Split across stacks the way a real pile is.
+function FakeTurtle:dropItem(x, y, z, name, count)
+  local k = key(x, y, z)
+  self.items[k] = self.items[k] or {}
+  local pile = self.items[k]
+  count = count or 1
+  while count > 0 do
+    local take = math.min(STACK, count)
+    pile[#pile + 1] = { name = name, count = take }
+    count = count - take
+  end
+end
+
+function FakeTurtle:itemsAt(x, y, z)
+  local n = 0
+  local pile = self.items[key(x, y, z)]
+  if pile then
+    for _, s in ipairs(pile) do n = n + s.count end
+  end
+  return n
+end
+
+function FakeTurtle:looseItemCount()
+  local n = 0
+  for _, pile in pairs(self.items) do
+    for _, s in ipairs(pile) do n = n + s.count end
+  end
+  return n
+end
+
+-- One stack per call, and false when the inventory has no room for it --
+-- which is what tells a sweeper it is time to go and empty out.
+function FakeTurtle:suckFrom(x, y, z)
+  self:tick()
+  local k = key(x, y, z)
+  local pile = self.items[k]
+  if not pile or #pile == 0 then return false end
+
+  local stack    = pile[1]
+  local leftover = self:give(stack.name, stack.count)
+  if leftover >= stack.count then return false end
+
+  stack.count = leftover
+  if stack.count <= 0 then
+    table.remove(pile, 1)
+    if #pile == 0 then self.items[k] = nil end
+  end
+  return true
+end
+
+-- A patrol loop only ends when we end it. Retry backoffs are well under a
+-- second, so only a real patrol delay counts against the limit.
+function FakeTurtle:sleepFor(n)
+  if (n or 0) < 1 then return end
+  self.longSleeps = self.longSleeps + 1
+  if self.sleepLimit and self.longSleeps >= self.sleepLimit then
+    error(FakeTurtle.STOP, 0)
+  end
 end
 
 function FakeTurtle:ahead(n)
@@ -251,9 +328,9 @@ function FakeTurtle:api()
     return true
   end
 
-  t.suck     = function() return false end
-  t.suckUp   = function() return false end
-  t.suckDown = function() return false end
+  t.suck     = function() return w:suckFrom(w:ahead()) end
+  t.suckUp   = function() return w:suckFrom(w.pos.x, w.pos.y, w.pos.z + 1) end
+  t.suckDown = function() return w:suckFrom(w.pos.x, w.pos.y, w.pos.z - 1) end
 
   return t
 end
@@ -262,7 +339,8 @@ function FakeTurtle:env()
   local w = self
   local env = {}
 
-  local fakeOs = setmetatable({ sleep = function() end }, { __index = os })
+  local fakeOs = setmetatable({ sleep = function(n) w:sleepFor(n) end },
+                              { __index = os })
   local fakeTerm = {
     clear = function() end,
     setCursorPos = function() end,
@@ -272,7 +350,7 @@ function FakeTurtle:env()
   env.turtle = self:api()
   env.os     = fakeOs
   env.term   = fakeTerm
-  env.sleep  = function() end
+  env.sleep  = function(n) w:sleepFor(n) end
   env.print  = function(...)
     local parts = {}
     for i = 1, select("#", ...) do parts[#parts + 1] = tostring((select(i, ...))) end
@@ -303,7 +381,10 @@ end
 function FakeTurtle:run(path)
   local chunk, err = loadfile(path, "t", self:env())
   if not chunk then return false, err end
-  return pcall(chunk)
+  local ok, runErr = pcall(chunk)
+  -- Cutting a patrol loop short on purpose is a finish, not a failure.
+  if not ok and runErr == FakeTurtle.STOP then return true, nil end
+  return ok, runErr
 end
 
 function FakeTurtle:logText()
