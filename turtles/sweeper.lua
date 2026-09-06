@@ -1,19 +1,26 @@
 --[[
-  sweeper.lua -- ComputerCraft / CC:Tweaked item sweeper turtle
+  10x10-picker-upper.lua -- ComputerCraft / CC:Tweaked item sweeper turtle
 
   Patrols a WIDTH x LENGTH area on a single layer, vacuuming up loose item
   drops. Returns to a chest behind its start position when the inventory
   fills, then resumes exactly where it left off.
 
+  A turtle cannot suck up items that share its own block, so the sweep is
+  flown one block ABOVE the litter layer and every cell is cleared with
+  suckDown(). That keeps coverage independent of which way the turtle
+  happens to be facing, and keeps it from reaching outside the area.
+
   SETUP
-    - Place the turtle at a corner of the area, facing along the first row.
-    - Place a chest DIRECTLY BEHIND the turtle.
+    - Place the turtle at a corner of the area, standing on the surface you
+      want swept, facing along the first row.
+    - Leave the block directly above the turtle clear; it hovers to work.
+    - Place a chest DIRECTLY BEHIND the turtle, on the turtle's own layer.
     - The turtle's starting block is cell (0,0) and is included in the sweep.
     - Give it some coal or charcoal; it will refuel itself and will never
       dump fuel into the chest.
 
   RUN
-    sweeper
+    10x10-picker-upper
 ]]
 
 -- ============================================================
@@ -23,8 +30,12 @@
 local WIDTH        = 10    -- columns (sideways, to the turtle's right)
 local LENGTH       = 10    -- rows (forward, the way the turtle starts facing)
 local PATROL_DELAY = 60    -- seconds to wait between full passes
-local FUEL_MIN     = 200   -- refuel when fuel drops below this
+local FUEL_MIN     = 200   -- top up when fuel drops below this
+local FUEL_MARGIN  = 16    -- keep at least this much on top of the trip home
 local MAX_STUCK    = 3     -- give up on a cell after this many failed moves
+local CLIMB_LIMIT  = 3     -- how many blocks we'll climb to get over something
+local SUCK_LIMIT   = 64    -- max suck() calls per cell, so we can't spin forever
+local SWEEP_ALT    = 1     -- blocks above the start layer that we cruise at
 
 local FUEL_ITEMS = {
   ["minecraft:coal"]        = true,
@@ -33,14 +44,18 @@ local FUEL_ITEMS = {
   ["minecraft:blaze_rod"]   = true,
 }
 
+-- Block names that are safe to drop into. Used only as a fallback when the
+-- peripheral API can't tell us what's in front.
+local INVENTORY_HINTS = { "chest", "barrel", "shulker_box", "hopper", "drawer" }
+
 -- ============================================================
 -- STATE
 -- ============================================================
 
 -- facing: 0 = start direction (+Y), 1 = right (+X), 2 = back (-Y), 3 = left (-X)
-local pos    = { x = 0, y = 0 }
+-- pos.z is height above the layer the turtle was placed on.
+local pos    = { x = 0, y = 0, z = 0 }
 local facing = 0
-local alt    = 0   -- how many blocks above the sweep layer we currently are
 
 local DX = { [0] =  0, [1] =  1, [2] =  0, [3] = -1 }
 local DY = { [0] =  1, [1] =  0, [2] = -1, [3] =  0 }
@@ -70,7 +85,8 @@ local function faceDir(d)
   end
 end
 
--- Raw step that keeps pos in sync.
+-- Raw steps that keep pos in sync. Every move in this script goes through
+-- one of these, so pos never drifts from where the turtle actually is.
 local function stepForward()
   if turtle.forward() then
     pos.x = pos.x + DX[facing]
@@ -80,52 +96,65 @@ local function stepForward()
   return false
 end
 
--- Drop back down to the sweep layer if we hopped over something.
-local function descend()
-  while alt > 0 do
-    if turtle.down() then
-      alt = alt - 1
-    else
-      return false   -- sitting on top of an obstruction; keep going anyway
-    end
+local function stepUp()
+  if turtle.up() then pos.z = pos.z + 1; return true end
+  return false
+end
+
+local function stepDown()
+  if turtle.down() then pos.z = pos.z - 1; return true end
+  return false
+end
+
+-- Climb or drop to a given height. Returns false if something is in the way,
+-- but pos.z still reflects wherever we actually stopped.
+local function goToAlt(target)
+  while pos.z < target do
+    if not stepUp() then return false end
+  end
+  while pos.z > target do
+    if not stepDown() then return false end
   end
   return true
 end
 
--- Move one block forward. If blocked, try hopping up and over.
-local function moveForward()
+-- Move one block forward at cruising height. If blocked, climb over.
+local function moveForward(cruise)
   if stepForward() then
-    descend()
+    goToAlt(cruise)
     return true
   end
 
-  -- Obstacle: go around by climbing over it.
-  if turtle.up() then
-    alt = alt + 1
+  -- Obstacle: try to get over it, remembering how high we went so we can
+  -- put ourselves back if there's no way through.
+  local startZ  = pos.z
+  local climbed = 0
+  while climbed < CLIMB_LIMIT and stepUp() do
+    climbed = climbed + 1
     if stepForward() then
-      descend()
+      goToAlt(cruise)
       return true
     end
-    if turtle.down() then alt = alt - 1 end
   end
 
+  goToAlt(startZ)
   return false
 end
 
 -- Walk to a grid cell, preferring the Y axis then falling back to X.
-local function navigateTo(tx, ty)
+local function navigateTo(tx, ty, cruise)
   local stuck = 0
   while pos.x ~= tx or pos.y ~= ty do
     local moved = false
 
     if pos.y ~= ty then
       faceDir(pos.y < ty and 0 or 2)
-      moved = moveForward()
+      moved = moveForward(cruise)
     end
 
     if not moved and pos.x ~= tx then
       faceDir(pos.x < tx and 1 or 3)
-      moved = moveForward()
+      moved = moveForward(cruise)
     end
 
     if moved then
@@ -138,7 +167,7 @@ local function navigateTo(tx, ty)
       os.sleep(0.5)
     end
   end
-  descend()
+  goToAlt(cruise)
   return true
 end
 
@@ -152,6 +181,17 @@ local function freeSlots()
     if turtle.getItemCount(i) == 0 then n = n + 1 end
   end
   return n
+end
+
+-- Blocks of fuel we'd burn just getting back to the chest from here.
+local function fuelToHome()
+  return math.abs(pos.x) + math.abs(pos.y) + math.abs(pos.z)
+end
+
+local function fuelOk()
+  local level = turtle.getFuelLevel()
+  if level == "unlimited" then return true end
+  return level > fuelToHome() + FUEL_MARGIN
 end
 
 local function refuelIfNeeded()
@@ -174,32 +214,61 @@ local function refuelIfNeeded()
   return turtle.getFuelLevel() >= FUEL_MIN
 end
 
--- Vacuum the block in front, above, and below the current position.
+-- Vacuum the cell we are hovering over, plus whatever is within reach.
+-- suckDown() is the one that matters: it clears the cell we are standing on
+-- regardless of facing, which is what makes coverage complete. The forward
+-- and upward sucks are a bonus and may pull in a neighbouring row.
 local function sweepCell()
-  local got = false
-  local guard = 0
-  while turtle.suck()     and guard < 64 do got = true; guard = guard + 1 end
-  guard = 0
-  while turtle.suckUp()   and guard < 64 do got = true; guard = guard + 1 end
-  guard = 0
-  while turtle.suckDown() and guard < 64 do got = true; guard = guard + 1 end
+  local got = 0
+  while got < SUCK_LIMIT and turtle.suckDown() do got = got + 1 end
+  while got < SUCK_LIMIT and turtle.suck()     do got = got + 1 end
+  while got < SUCK_LIMIT and turtle.suckUp()   do got = got + 1 end
   return got
 end
 
--- Assumes the turtle is already at (0,0). Faces the chest, empties out,
--- then restores the original facing.
+-- turtle.drop() throws items on the FLOOR when there's no inventory in front
+-- and still reports success, so we have to check for a real container first
+-- or a missing chest silently scatters the whole haul.
+local function inventoryInFront()
+  if peripheral and peripheral.wrap then
+    local ok, p = pcall(peripheral.wrap, "front")
+    if ok and type(p) == "table" and (p.size or p.list or p.pushItems) then
+      return true
+    end
+  end
+
+  local found, data = turtle.inspect()
+  if not found or type(data) ~= "table" or not data.name then return false end
+  for _, hint in ipairs(INVENTORY_HINTS) do
+    if string.find(data.name, hint, 1, true) then return true end
+  end
+  return false
+end
+
+-- Assumes the turtle is already over (0,0). Drops to the chest's layer,
+-- empties out, then returns to cruising height facing forward.
+-- Returns (stacks dumped, whether everything non-fuel got out).
 local function dumpToChest()
+  goToAlt(0)
   faceDir(2)
 
-  local dumped = 0
+  if not inventoryInFront() then
+    print("  ! No container behind me - holding items rather than dropping them")
+    faceDir(0)
+    return 0, false
+  end
+
+  local dumped, blocked = 0, false
   for i = 1, 16 do
     local item = turtle.getItemDetail(i)
     if item and not FUEL_ITEMS[item.name] then
       turtle.select(i)
-      if turtle.drop() then
+      turtle.drop()
+      if turtle.getItemCount(i) == 0 then
         dumped = dumped + 1
       else
-        print("  ! Chest full or missing - holding items")
+        print("  ! Chest is full - holding the rest")
+        blocked = true
         break
       end
     end
@@ -207,7 +276,7 @@ local function dumpToChest()
 
   turtle.select(1)
   faceDir(0)
-  return dumped
+  return dumped, not blocked
 end
 
 -- ============================================================
@@ -233,14 +302,23 @@ end
 
 local function chestRun(resume)
   print("  Inventory full - returning to chest")
-  if not navigateTo(0, 0) then
+  if not navigateTo(0, 0, SWEEP_ALT) then
     print("  ! Could not reach home. Stopping.")
     return false
   end
-  local n = dumpToChest()
+
+  local n, emptied = dumpToChest()
   print("  Dumped " .. n .. " stack(s)")
+
+  -- If we came home full and go back out still full we'd just bounce off the
+  -- chest once per cell forever, so stop instead.
+  if not emptied or freeSlots() == 0 then
+    print("  ! No inventory space freed. Halting so we don't spin.")
+    return false
+  end
+
   refuelIfNeeded()
-  if resume and not navigateTo(resume.x, resume.y) then
+  if resume and not navigateTo(resume.x, resume.y, SWEEP_ALT) then
     print("  ! Could not return to " .. resume.x .. "," .. resume.y)
     return false
   end
@@ -253,14 +331,15 @@ local function doPass()
   local i       = 1
 
   while i <= #cells do
-    if not refuelIfNeeded() then
-      print("  ! Out of fuel. Heading home.")
-      navigateTo(0, 0)
+    refuelIfNeeded()
+    if not fuelOk() then
+      print("  ! Fuel too low to keep going. Heading home.")
+      navigateTo(0, 0, SWEEP_ALT)
       return false
     end
 
     local cell = cells[i]
-    if navigateTo(cell.x, cell.y) then
+    if navigateTo(cell.x, cell.y, SWEEP_ALT) and pos.z == SWEEP_ALT then
       sweepCell()
     else
       print("  ~ Skipped cell " .. cell.x .. "," .. cell.y .. " (blocked)")
@@ -269,9 +348,8 @@ local function doPass()
 
     i = i + 1
 
-    if freeSlots() == 0 then
-      local resume = cells[math.min(i, #cells)]
-      if not chestRun(resume) then return false end
+    if freeSlots() == 0 and i <= #cells then
+      if not chestRun(cells[i]) then return false end
     end
   end
 
@@ -302,11 +380,10 @@ local function main()
 
     local ok = doPass()
 
-    if not navigateTo(0, 0) then
+    if not navigateTo(0, 0, SWEEP_ALT) then
       print("! Lost - could not get home. Halting.")
       return
     end
-    faceDir(0)
     dumpToChest()
 
     if not ok then
