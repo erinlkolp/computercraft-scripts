@@ -203,6 +203,114 @@ test("mines nothing on ground that is already flat", function()
              "expected nothing to be mined, got:\n" .. w:logText())
 end)
 
+test("posts mined fuel to the chest instead of seizing up on it", function()
+  -- A seam of coal blocks is ordinary spoil. Holding every one of them back
+  -- as "fuel" fills all 16 slots and abandons the rest of the job.
+  local w = FakeTurtle.new({ fuel = 200000, opLimit = 5000000 })
+  w:fill(-2, 16, -2, 16, -1, -1, "minecraft:grass_block")
+  local seam = 0
+  for x = 0, AREA - 1 do
+    for y = 0, AREA - 1 do
+      for z = 0, 7 do
+        if not (x == 0 and y == 0 and z == 0) then   -- the turtle stands here
+          w:setBlock(x, y, z, "minecraft:coal_block")
+          seam = seam + 1
+        end
+      end
+    end
+  end
+  local chest = w:placeChest(0, -1, 0, 512)
+  run(w)
+
+  local left = 0
+  for x = 0, AREA - 1 do
+    for y = 0, AREA - 1 do
+      for z = 0, 7 do
+        if w:getBlock(x, y, z) then left = left + 1 end
+      end
+    end
+  end
+  assertEq(left, 0, "the job was abandoned with blocks still standing")
+  assertEq(#w.scattered, 0, "items were dropped on the floor")
+  assertTrue(w:countInChest(chest, "minecraft:coal_block") > 0,
+             "no coal blocks reached the chest")
+  assertEq(w:countInChest(chest, "minecraft:coal_block") +
+           w:countInInv("minecraft:coal_block"), seam, "spoil went missing")
+end)
+
+-- ---------- self-update ----------
+
+-- The flattener's source as it sits in this repo, with the version line
+-- rewritten, standing in for a release published to the server.
+local function published(version)
+  local f = assert(io.open(SCRIPT, "r"))
+  local src = f:read("*a")
+  f:close()
+  return (src:gsub('local VERSION%s*=%s*"[%d%.]+"',
+                   'local VERSION      = "' .. version .. '"', 1))
+end
+
+local function withUpdater(w)
+  w:install("lib/updater.lua", "updater.lua")
+  local upd = w:loadInstalled("updater.lua")
+  return upd.rawUrl(upd.SOURCES["flattener.lua"])
+end
+
+test("runs perfectly well with no updater installed", function()
+  local w = run(buildWorld())
+  assertEq(#w.requests, 0, "should not have gone looking for the network")
+  assertEq(w.reboots, 0, "should not have rebooted")
+end)
+
+test("checks for a new version once, before it starts digging", function()
+  local w = buildWorld()
+  local url = withUpdater(w)
+  w:serve(url, published("1.0.0"))          -- same version we are running
+  run(w)
+
+  assertEq(#w.requests, 1, "a one-shot job checks once, not once per layer")
+  assertEq(w.reboots, 0, "nothing newer was published, so no restart")
+  assertTrue(w:logText():find("Mined", 1, true), "the job should still have run")
+end)
+
+test("installs a new version and restarts before touching the ground", function()
+  local w = buildWorld()
+  local url = withUpdater(w)
+  local fresh = published("2.0.0")
+  w:serve(url, fresh)
+  run(w)
+
+  assertEq(w.reboots, 1, "expected exactly one restart")
+  assertEq(w:readFile("flattener.lua"), fresh, "the new version should be installed")
+  -- Restarting is only safe because it happens before the first move.
+  assertEq(w.minDigZ, math.huge, "it must not have dug anything before restarting")
+  assertEq(w.pos.x, 0, "restarted away from home x")
+  assertEq(w.pos.y, 0, "restarted away from home y")
+  assertEq(w.pos.z, 0, "restarted away from home z")
+  assertEq(w.facing, 0, "restarted facing the wrong way")
+end)
+
+test("gets on with the job when the update check cannot reach the network", function()
+  local w = buildWorld()
+  withUpdater(w)                            -- updater present, nothing served
+  run(w)
+
+  assertTrue(#w.requests > 0, "it should have tried")
+  assertEq(w.reboots, 0, "being offline is not a reason to restart")
+  assertTrue(w:logText():find("Mined", 1, true), "the job should have run normally")
+end)
+
+test("refuses a broken release and flattens with the version it has", function()
+  local w = buildWorld()
+  local url = withUpdater(w)
+  w:serve(url, 'local VERSION      = "9.9.9"\nthis is not lua (((')
+  run(w)
+
+  assertEq(w.reboots, 0, "must not restart into a program that will not load")
+  assertTrue(w:logText():find("Update refused", 1, true), "expected a refusal notice")
+  assertTrue(w:logText():find("Mined", 1, true), "the job should have run normally")
+end)
+
 print("")
 if #failures > 0 then
   print(#failures .. " of " .. count .. " failed")
