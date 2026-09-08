@@ -22,7 +22,7 @@ fleet. We ask only that you tell us what we got wrong.
 |---|---|
 | Programs | 2, plus an optional self-update library |
 | External dependencies | 0 |
-| Tests | 55, all passing |
+| Tests | 58, all passing |
 | Blocks dug outside the work area | 0 |
 
 ## Requirements
@@ -80,7 +80,7 @@ wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/head
 | `DIG_RETRY` | `8` | Re-digs per block, so a gravel column cannot win |
 | `FUEL_KEEP` | `64` | Fuel held back; mined coal beyond that goes in the chest |
 | `VERSION` | `1.0.0` | Bump to roll an update out to a fleet |
-| `AUTOSTART` | `true` | Keep a `startup.lua` so a reboot comes back up working |
+| `AUTOSTART` | `false` | Set true to keep a `startup.lua`, so a reboot comes back up working |
 
 ---
 
@@ -127,7 +127,7 @@ wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/head
 | `FUEL_KEEP` | `64` | Fuel held back; swept coal beyond that goes in the chest |
 | `CELL_RETRY` | `8` | Chest runs made for one heavily littered cell |
 | `VERSION` | `1.0.0` | Bump to roll an update out to a fleet |
-| `AUTOSTART` | `true` | Keep a `startup.lua` so a reboot comes back up sweeping |
+| `AUTOSTART` | `false` | Set true to keep a `startup.lua`, so a reboot comes back up sweeping |
 
 ## Keeping them up to date
 
@@ -187,15 +187,24 @@ updater restore sweeper.lua
 ```
 
 **Coming back up.** A reboot with no startup file leaves the turtle sitting at
-a prompt, which at the bottom of a hole is no better than bricked. So with
-`AUTOSTART` on — the default — the updater keeps a `startup.lua` that
-relaunches the program. It writes a marker comment into that file and will
-only ever overwrite a file carrying it; a `startup.lua` you wrote yourself is
-reported and left alone. Set `AUTOSTART = false` at the top of either program
-to opt out entirely.
+a prompt, which at the bottom of a hole is no better than bricked. So a
+program only ever restarts itself when it knows it will come back up running:
 
-The side benefit is that turtles then also come back from chunk unloads and
-server restarts, not just updates.
+| `AUTOSTART` | What happens when an update lands |
+|---|---|
+| `false` *(default)* | The new version is installed and the turtle carries on with the one it is running. The update takes effect the next time you start the program yourself. Nothing is written to the computer beyond the program and its backup. |
+| `true` | The updater keeps a `startup.lua` that relaunches the program, and the turtle restarts into the new version straight away. |
+
+`AUTOSTART` never starts anything on its own initiative — it only relaunches
+the program the turtle was already running. It ships off because switching it
+on writes a `startup.lua`, and a program should not quietly change how a
+computer boots.
+
+When it is on, the updater writes a marker comment into that file and will
+only ever overwrite a file carrying it; a `startup.lua` you wrote yourself is
+reported and left alone. The side benefit of turning it on is that turtles
+then also come back from chunk unloads and server restarts, not just
+updates.
 
 **Running it by hand**
 
@@ -218,12 +227,12 @@ front throws your inventory on the floor and reports success.
 From the repository root:
 
 ```
-lua test/flattener_test.lua    # 19 cases
-lua test/sweeper_test.lua      # 21 cases
+lua test/flattener_test.lua    # 20 cases
+lua test/sweeper_test.lua      # 23 cases
 lua test/updater_test.lua      # 15 cases
 ```
 
-Fifty-five cases between them, covering coverage, containment, and the failure
+Fifty-eight cases between them, covering coverage, containment, and the failure
 modes that cost real dirt: nothing dug below the start layer, nothing dug
 outside the footprint, nothing vacuumed from outside it either, the chest never
 mined, nothing scattered on the ground, no litter abandoned on a cell the hold

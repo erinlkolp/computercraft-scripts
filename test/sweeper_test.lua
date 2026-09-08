@@ -262,6 +262,18 @@ local function published(version)
                    'local VERSION      = "' .. version .. '"', 1))
 end
 
+-- AUTOSTART ships off, so a turtle only ever writes a startup.lua if you
+-- asked for one. Flip it in the source to exercise the other half.
+local function autostartOn(src)
+  return (src:gsub("local AUTOSTART%s*=%s*false", "local AUTOSTART    = true", 1))
+end
+
+local function runWith(w, src)
+  local ok, err = w:runSource(src, SCRIPT)
+  assertTrue(ok, "script errored: " .. tostring(err))
+  return w
+end
+
 local function withUpdater(w)
   w:install("lib/updater.lua", "updater.lua")
   local upd = w:loadInstalled("updater.lua")
@@ -292,7 +304,7 @@ test("installs a new version published between passes and restarts", function()
   local fresh = published("2.0.0")
   -- Current at the startup check, newer by the time the pass is done.
   w:serve(url, function(n) return n == 1 and published("1.0.0") or fresh end)
-  run(w)
+  runWith(w, autostartOn(published("1.0.0")))
 
   assertEq(w.reboots, 1, "expected exactly one restart")
   assertEq(w:readFile("sweeper.lua"), fresh, "the new version should be installed")
@@ -306,15 +318,42 @@ test("installs a new version published between passes and restarts", function()
   assertEq(w.facing, 0, "restarted facing the wrong way")
 end)
 
-test("leaves a startup file so a restarted turtle comes back up sweeping", function()
+test("leaves a startup file, but only when asked to", function()
+  local w = buildWorld()
+  local url = withUpdater(w)
+  w:serve(url, published("1.0.0"))
+  runWith(w, autostartOn(published("1.0.0")))
+
+  local startup = w:readFile("startup.lua")
+  assertTrue(startup, "expected a startup.lua")
+  assertTrue(startup:find("sweeper.lua", 1, true), "it should relaunch the sweeper")
+end)
+
+test("writes nothing to the computer with autostart off, as it ships", function()
   local w = buildWorld()
   local url = withUpdater(w)
   w:serve(url, published("1.0.0"))
   run(w)
 
-  local startup = w:readFile("startup.lua")
-  assertTrue(startup, "expected a startup.lua")
-  assertTrue(startup:find("sweeper.lua", 1, true), "it should relaunch the sweeper")
+  assertTrue(not w:readFile("startup.lua"),
+             "a turtle must not gain a startup.lua nobody asked for")
+end)
+
+test("takes an update without restarting when it cannot come back up", function()
+  -- With autostart off there is no startup file, so a reboot would leave the
+  -- turtle at a prompt. Install the new version and carry on with the old one
+  -- instead; it takes effect the next time somebody starts it.
+  local w = buildWorld()
+  local url = withUpdater(w)
+  local fresh = published("2.0.0")
+  w:serve(url, fresh)
+  run(w)
+
+  assertEq(w.reboots, 0, "must not reboot with nothing to come back up into")
+  assertEq(w:readFile("sweeper.lua"), fresh, "the new version should still be installed")
+  assertTrue(w:logText():find("starts on the next run", 1, true),
+             "expected a deferred-restart notice, got:\n" .. w:logText())
+  assertEq(chestTotal(w.chest), w.littered, "the pass should have finished normally")
 end)
 
 test("carries on sweeping when the update check cannot reach the network", function()

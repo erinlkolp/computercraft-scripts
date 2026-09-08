@@ -29,8 +29,11 @@
     for a newer version of itself at startup and again between passes, and
     restarts into it. Without that file nothing changes. Never mid-pass: the
     position below is held in memory only, so a turtle that rebooted partway
-    round would wake up believing it was back at the corner. See VERSION and
-    AUTOSTART in CONFIG below.
+    round would wake up believing it was back at the corner.
+
+    A restart only brings the turtle back up running if AUTOSTART is set. It
+    is off by default, because switching it on writes a startup.lua to the
+    computer. See VERSION and AUTOSTART in CONFIG below.
 
   RUN
     sweeper
@@ -43,7 +46,8 @@
 -- Bumping this is what rolls an update out to a fleet. See lib/updater.lua.
 local VERSION      = "1.0.0"
 local PROGRAM      = "sweeper.lua"  -- what we are installed as, for updates
-local AUTOSTART    = true  -- keep a startup.lua so a reboot comes back here
+local AUTOSTART    = false -- set true to keep a startup.lua, so a turtle
+                          -- that reboots comes back up running this
 
 local WIDTH        = 10    -- columns (sideways, to the turtle's right)
 local LENGTH       = 10    -- rows (forward, the way the turtle starts facing)
@@ -461,18 +465,26 @@ local function updateCheck()
   local upd = loadUpdater()
   if not upd then return end
 
-  -- Make sure a reboot brings us back up running, rather than dropping the
-  -- turtle to a prompt somewhere nobody is going to walk to.
+  -- Only ever reboot if we know we will come back up running. A reboot with
+  -- no startup file drops the turtle to a prompt, which is a worse outcome
+  -- than working on with the version we already have.
+  local canRestart = false
   if AUTOSTART then
     local st, detail = upd.ensureStartup(PROGRAM)
-    if st == "foreign" then print("  ~ " .. tostring(detail)) end
+    canRestart = (st == "written" or st == "current")
+    if not canRestart then print("  ~ " .. tostring(detail)) end
   end
 
   local status, detail = upd.check(PROGRAM, VERSION)
   if status == "updated" then
-    print("Updated " .. tostring(detail) .. " - restarting.")
-    os.sleep(1)
-    os.reboot()
+    if canRestart then
+      print("Updated " .. tostring(detail) .. " - restarting.")
+      os.sleep(1)
+      os.reboot()
+    else
+      -- Installed, but staying put: it takes effect next time you start it.
+      print("Updated " .. tostring(detail) .. " - starts on the next run.")
+    end
   elseif status == "rejected" then
     print("! Update refused: " .. tostring(detail))
   end

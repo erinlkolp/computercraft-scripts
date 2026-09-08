@@ -532,8 +532,10 @@ function FakeTurtle:loadInstalled(name)
   return chunk()
 end
 
-function FakeTurtle:run(path)
-  local chunk, err = loadfile(path, "t", self:env())
+-- Run a program from source. Lets a test flip a config constant the program
+-- has no runtime setting for, and run the result.
+function FakeTurtle:runSource(src, chunkName)
+  local chunk, err = load(src, "@" .. (chunkName or "program"), "t", self:env())
   if not chunk then return false, err end
   local ok, runErr = pcall(chunk)
   -- Cutting a patrol loop short on purpose is a finish, not a failure, and
@@ -542,6 +544,14 @@ function FakeTurtle:run(path)
     return true, nil
   end
   return ok, runErr
+end
+
+function FakeTurtle:run(path)
+  local f = io.open(path, "r")
+  if not f then return false, path .. ": No such file" end
+  local src = f:read("*a")
+  f:close()
+  return self:runSource(src, path)
 end
 
 function FakeTurtle:logText()

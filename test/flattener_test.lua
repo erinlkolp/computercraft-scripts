@@ -250,6 +250,18 @@ local function published(version)
                    'local VERSION      = "' .. version .. '"', 1))
 end
 
+-- AUTOSTART ships off, so a turtle only ever writes a startup.lua if you
+-- asked for one. Flip it in the source to exercise the other half.
+local function autostartOn(src)
+  return (src:gsub("local AUTOSTART%s*=%s*false", "local AUTOSTART    = true", 1))
+end
+
+local function runWith(w, src)
+  local ok, err = w:runSource(src, SCRIPT)
+  assertTrue(ok, "script errored: " .. tostring(err))
+  return w
+end
+
 local function withUpdater(w)
   w:install("lib/updater.lua", "updater.lua")
   local upd = w:loadInstalled("updater.lua")
@@ -278,7 +290,7 @@ test("installs a new version and restarts before touching the ground", function(
   local url = withUpdater(w)
   local fresh = published("2.0.0")
   w:serve(url, fresh)
-  run(w)
+  runWith(w, autostartOn(published("1.0.0")))
 
   assertEq(w.reboots, 1, "expected exactly one restart")
   assertEq(w:readFile("flattener.lua"), fresh, "the new version should be installed")
@@ -288,6 +300,23 @@ test("installs a new version and restarts before touching the ground", function(
   assertEq(w.pos.y, 0, "restarted away from home y")
   assertEq(w.pos.z, 0, "restarted away from home z")
   assertEq(w.facing, 0, "restarted facing the wrong way")
+end)
+
+test("takes an update without restarting when it cannot come back up", function()
+  -- With autostart off there is no startup file, so a reboot would leave the
+  -- turtle at a prompt. Install the new version and do the job with the old
+  -- one instead; it takes effect the next time somebody starts it.
+  local w = buildWorld()
+  local url = withUpdater(w)
+  local fresh = published("2.0.0")
+  w:serve(url, fresh)
+  run(w)
+
+  assertEq(w.reboots, 0, "must not reboot with nothing to come back up into")
+  assertEq(w:readFile("flattener.lua"), fresh, "the new version should still be installed")
+  assertTrue(not w:readFile("startup.lua"),
+             "a turtle must not gain a startup.lua nobody asked for")
+  assertTrue(w:logText():find("Mined", 1, true), "the job should have run to completion")
 end)
 
 test("gets on with the job when the update check cannot reach the network", function()
