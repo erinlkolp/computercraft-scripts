@@ -19,8 +19,21 @@
       which still works but misses some cells.
     - Place a chest DIRECTLY BEHIND the turtle, on the turtle's own layer.
     - The turtle's starting block is cell (0,0) and is included in the sweep.
-    - Give it some coal or charcoal; it will refuel itself and will never
-      dump fuel into the chest.
+    - Give it some coal or charcoal; it refuels itself and keeps FUEL_KEEP
+      items back as a reserve. Coal it sweeps up beyond that goes in the
+      chest like any other loot, so a coal-strewn yard cannot fill all
+      sixteen slots with spoil it refuses to put down.
+
+  UPDATES
+    Optional. With lib/updater.lua installed alongside it, this program looks
+    for a newer version of itself at startup and again between passes, and
+    restarts into it. Without that file nothing changes. Never mid-pass: the
+    position below is held in memory only, so a turtle that rebooted partway
+    round would wake up believing it was back at the corner.
+
+    A restart only brings the turtle back up running if AUTOSTART is set. It
+    is off by default, because switching it on writes a startup.lua to the
+    computer. See VERSION and AUTOSTART in CONFIG below.
 
   RUN
     sweeper
@@ -29,6 +42,12 @@
 -- ============================================================
 -- CONFIG
 -- ============================================================
+
+-- Bumping this is what rolls an update out to a fleet. See lib/updater.lua.
+local VERSION      = "1.0.0"
+local PROGRAM      = "sweeper.lua"  -- what we are installed as, for updates
+local AUTOSTART    = false -- set true to keep a startup.lua, so a turtle
+                          -- that reboots comes back up running this
 
 local WIDTH        = 10    -- columns (sideways, to the turtle's right)
 local LENGTH       = 10    -- rows (forward, the way the turtle starts facing)
@@ -39,6 +58,8 @@ local MAX_STUCK    = 3     -- give up on a cell after this many failed moves
 local CLIMB_LIMIT  = 3     -- how many blocks we'll climb to get over something
 local SUCK_LIMIT   = 64    -- max suck() calls per cell, so we can't spin forever
 local SWEEP_ALT    = 1     -- blocks above the start layer that we cruise at
+local FUEL_KEEP    = 64    -- fuel items held back; the rest goes in the chest
+local CELL_RETRY   = 8     -- chest runs we'll make for one very littered cell
 
 local FUEL_ITEMS = {
   ["minecraft:coal"]        = true,
@@ -217,15 +238,28 @@ local function refuelIfNeeded()
   return turtle.getFuelLevel() >= FUEL_MIN
 end
 
+local function inArea(x, y)
+  return x >= 0 and x < WIDTH and y >= 0 and y < LENGTH
+end
+
 -- Vacuum the cell we are hovering over, plus whatever is within reach.
 -- suckDown() is the one that matters: it clears the cell we are standing on
--- regardless of facing, which is what makes coverage complete. The forward
--- and upward sucks are a bonus and may pull in a neighbouring row.
+-- regardless of facing, which is what makes coverage complete.
+--
+-- The forward suck reaches the NEXT cell along, which on an edge row is
+-- somebody else's ground -- and at ground level, where the forward suck is
+-- the only one that does anything, that includes the row the chest sits in.
+-- So it only runs when the cell in front is ours. Up and down share our own
+-- column and are always in bounds.
 local function sweepCell()
   local got = 0
   while got < SUCK_LIMIT and turtle.suckDown() do got = got + 1 end
-  while got < SUCK_LIMIT and turtle.suck()     do got = got + 1 end
-  while got < SUCK_LIMIT and turtle.suckUp()   do got = got + 1 end
+
+  if inArea(pos.x + DX[facing], pos.y + DY[facing]) then
+    while got < SUCK_LIMIT and turtle.suck() do got = got + 1 end
+  end
+
+  while got < SUCK_LIMIT and turtle.suckUp() do got = got + 1 end
   return got
 end
 
@@ -261,18 +295,29 @@ local function dumpToChest()
     return 0, false
   end
 
-  local dumped, blocked = 0, false
+  -- Fuel is held back, but only FUEL_KEEP of it. Coal is ordinary loot on a
+  -- yard, and treating every scrap of it as untouchable fuel is how a turtle
+  -- ends up with sixteen slots of spoil it refuses to put down.
+  local dumped, blocked, kept = 0, false, 0
   for i = 1, 16 do
     local item = turtle.getItemDetail(i)
-    if item and not FUEL_ITEMS[item.name] then
-      turtle.select(i)
-      turtle.drop()
-      if turtle.getItemCount(i) == 0 then
-        dumped = dumped + 1
-      else
-        print("  ! Chest is full - holding the rest")
-        blocked = true
-        break
+    if item then
+      local count, keep = turtle.getItemCount(i), 0
+      if FUEL_ITEMS[item.name] and kept < FUEL_KEEP then
+        keep = math.min(count, FUEL_KEEP - kept)
+        kept = kept + keep
+      end
+
+      if keep < count then
+        turtle.select(i)
+        turtle.drop(count - keep)
+        if turtle.getItemCount(i) <= keep then
+          dumped = dumped + 1
+        else
+          print("  ! Chest is full - holding the rest")
+          blocked = true
+          break
+        end
       end
     end
   end
@@ -344,6 +389,7 @@ local function doPass(cruise)
   local cells   = buildPath()
   local skipped = 0
   local i       = 1
+  local redos   = 0
 
   while i <= #cells do
     refuelIfNeeded()
@@ -354,10 +400,11 @@ local function doPass(cruise)
     end
 
     local cell = cells[i]
+    local got  = 0
     if navigateTo(cell.x, cell.y, cruise) then
       -- Sweep from wherever we actually ended up. If a local overhang pushed
       -- us below cruising height we still get the sideways sucks.
-      sweepCell()
+      got = sweepCell()
     else
       skipped = skipped + 1
       if skipped <= 3 then
@@ -367,10 +414,18 @@ local function doPass(cruise)
       end
     end
 
-    i = i + 1
-
-    if freeSlots() == 0 and i <= #cells then
-      if not chestRun(cells[i], cruise) then return false end
+    if freeSlots() > 0 then
+      i, redos = i + 1, 0
+    else
+      -- We filled up. A cell that ran us out of room part way through still
+      -- has litter on it, so empty out and come back to THIS cell rather
+      -- than walking on and leaving the remainder lying there.
+      if not chestRun(cell, cruise) then return false end
+      if got > 0 and redos < CELL_RETRY then
+        redos = redos + 1
+      else
+        i, redos = i + 1, 0
+      end
     end
   end
 
@@ -381,17 +436,75 @@ local function doPass(cruise)
 end
 
 -- ============================================================
+-- SELF-UPDATE
+-- ============================================================
+
+-- lib/updater.lua if it happens to be installed. Optional on purpose: a
+-- turtle with nothing but this one file wget'd onto it still runs, it just
+-- never picks up a new version by itself.
+local function loadUpdater()
+  if type(fs) ~= "table" or type(fs.exists) ~= "function" then return nil end
+  for _, path in ipairs({ "updater.lua", "/updater.lua", "lib/updater.lua" }) do
+    if fs.exists(path) then
+      local ok, mod = pcall(dofile, path)
+      if ok and type(mod) == "table" and type(mod.check) == "function" then
+        return mod
+      end
+    end
+  end
+  return nil
+end
+
+-- Look for a newer copy of ourselves and restart into it.
+--
+-- ONLY EVER CALL THIS SOMEWHERE STOPPING IS FREE. Position is tracked in
+-- memory and nothing is written to disk, so a turtle that reboots mid-job
+-- wakes up believing it is back at (0,0) facing the way it started -- and
+-- would work the wrong patch of ground from there.
+local function updateCheck()
+  local upd = loadUpdater()
+  if not upd then return end
+
+  -- Only ever reboot if we know we will come back up running. A reboot with
+  -- no startup file drops the turtle to a prompt, which is a worse outcome
+  -- than working on with the version we already have.
+  local canRestart = false
+  if AUTOSTART then
+    local st, detail = upd.ensureStartup(PROGRAM)
+    canRestart = (st == "written" or st == "current")
+    if not canRestart then print("  ~ " .. tostring(detail)) end
+  end
+
+  local status, detail = upd.check(PROGRAM, VERSION)
+  if status == "updated" then
+    if canRestart then
+      print("Updated " .. tostring(detail) .. " - restarting.")
+      os.sleep(1)
+      os.reboot()
+    else
+      -- Installed, but staying put: it takes effect next time you start it.
+      print("Updated " .. tostring(detail) .. " - starts on the next run.")
+    end
+  elseif status == "rejected" then
+    print("! Update refused: " .. tostring(detail))
+  end
+end
+
+-- ============================================================
 -- MAIN
 -- ============================================================
 
 local function main()
   term.clear()
   term.setCursorPos(1, 1)
-  print("=== Turtle Sweeper ===")
+  print("=== Turtle Sweeper v" .. VERSION .. " ===")
   print("Area: " .. WIDTH .. " x " .. LENGTH .. "  (" .. (WIDTH * LENGTH) .. " cells)")
   print("Fuel: " .. tostring(turtle.getFuelLevel()))
   print("Chest expected directly behind. Ctrl+T to stop.")
   print("")
+
+  -- Safe: nothing has moved yet, so we are exactly where we were placed.
+  updateCheck()
 
   refuelIfNeeded()
   local cruise = pickCruiseAlt()
@@ -414,6 +527,11 @@ local function main()
     end
 
     print("Pass " .. passNum .. " complete. Sleeping " .. PATROL_DELAY .. "s.")
+
+    -- Safe: parked on (0,0,0) facing the start direction with an empty hold,
+    -- which is exactly the state a fresh run expects to boot into.
+    updateCheck()
+
     print("")
     passNum = passNum + 1
     os.sleep(PATROL_DELAY)

@@ -20,9 +20,9 @@ fleet. We ask only that you tell us what we got wrong.
 
 | | |
 |---|---|
-| Programs | 2 |
+| Programs | 2, plus an optional self-update library |
 | External dependencies | 0 |
-| Tests | 25, all passing |
+| Tests | 58, all passing |
 | Blocks dug outside the work area | 0 |
 
 ## Requirements
@@ -31,7 +31,9 @@ fleet. We ask only that you tell us what we got wrong.
 - A mining turtle for `flattener`, any turtle for `sweeper`
 - A chest placed directly behind the turtle's starting position
 - Coal or charcoal in the turtle's inventory — both programs refuel themselves
-  and neither will ever dump fuel into the chest
+  and hold a stack back as a reserve
+- HTTP enabled, only if you want the programs to update themselves. It is on
+  by default in CC:Tweaked, and everything works without it
 - Lua 5.3+ on your workstation, if you want to run the tests
 
 ---
@@ -76,6 +78,9 @@ wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/head
 | `FUEL_MARGIN` | `16` | Reserve held on top of the trip home |
 | `MAX_STUCK` | `6` | Failed moves before a cell is abandoned |
 | `DIG_RETRY` | `8` | Re-digs per block, so a gravel column cannot win |
+| `FUEL_KEEP` | `64` | Fuel held back; mined coal beyond that goes in the chest |
+| `VERSION` | `1.0.0` | Bump to roll an update out to a fleet |
+| `AUTOSTART` | `false` | Set true to keep a `startup.lua`, so a reboot comes back up working |
 
 ---
 
@@ -119,6 +124,95 @@ wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/head
 | `FUEL_MIN` | `200` | Top up below this |
 | `FUEL_MARGIN` | `16` | Reserve held on top of the trip home |
 | `MAX_STUCK` | `3` | Failed moves before a cell is abandoned |
+| `FUEL_KEEP` | `64` | Fuel held back; swept coal beyond that goes in the chest |
+| `CELL_RETRY` | `8` | Chest runs made for one heavily littered cell |
+| `VERSION` | `1.0.0` | Bump to roll an update out to a fleet |
+| `AUTOSTART` | `false` | Set true to keep a `startup.lua`, so a reboot comes back up sweeping |
+
+## Keeping them up to date
+
+Both programs can fetch a newer copy of themselves and restart into it. It is
+optional in the way that matters: with no `updater.lua` on the turtle, nothing
+happens and the program runs exactly as it always did.
+
+**Install**
+
+```
+wget https://raw.githubusercontent.com/erinlkolp/computercraft-scripts/refs/heads/main/lib/updater.lua
+```
+
+**How it decides.** Each program carries its version on a line of its own:
+
+```lua
+local VERSION      = "1.0.0"
+```
+
+The updater fetches the copy on `main`, reads the `VERSION` line out of the
+downloaded text, and installs it only if that number is higher — compared
+component by component, so `1.10.0` beats `1.9.0` the way string comparison
+would not. Bumping that line is what rolls an update out to a fleet.
+Everything else you push to `main` — a comment, a typo, an edit to this file
+— goes out to nobody.
+
+**When it checks.** Only where stopping is free, because neither program
+writes its position to disk:
+
+| | |
+|---|---|
+| `flattener` | Once at startup, before the first move. A one-shot job has no safe point in the middle. |
+| `sweeper` | At startup, and again between passes — parked on (0,0), hold empty, facing the way it started, which is exactly the state a fresh run expects to boot into. |
+
+A turtle that rebooted halfway through a layer would wake up convinced it was
+back at the corner, and measure its next 15x15 from wherever it happened to be
+standing. That is why there is no mid-job update, and why adding one means
+persisting position first.
+
+**What it refuses.** Anything it is not sure of. It says so and carries on
+with the version it has:
+
+- a download that does not compile — the realistic shape of a truncated
+  response, and the one failure that would otherwise strand a turtle
+- a download that compiles but is less than half the size of the file it
+  replaces — a truncation that happened to land on a statement boundary
+- a copy with no `VERSION` line at all
+- no network, no HTTP API, a 404, a timeout
+
+The previous version is kept alongside as `<program>.bak`. There is no
+automatic rollback: a startup shim that catches a crash and restores the
+backup trades a bricked turtle for a possible reboot loop, which is worse. To
+undo an update by hand:
+
+```
+updater restore sweeper.lua
+```
+
+**Coming back up.** A reboot with no startup file leaves the turtle sitting at
+a prompt, which at the bottom of a hole is no better than bricked. So a
+program only ever restarts itself when it knows it will come back up running:
+
+| `AUTOSTART` | What happens when an update lands |
+|---|---|
+| `false` *(default)* | The new version is installed and the turtle carries on with the one it is running. The update takes effect the next time you start the program yourself. Nothing is written to the computer beyond the program and its backup. |
+| `true` | The updater keeps a `startup.lua` that relaunches the program, and the turtle restarts into the new version straight away. |
+
+`AUTOSTART` never starts anything on its own initiative — it only relaunches
+the program the turtle was already running. It ships off because switching it
+on writes a `startup.lua`, and a program should not quietly change how a
+computer boots.
+
+When it is on, the updater writes a marker comment into that file and will
+only ever overwrite a file carrying it; a `startup.lua` you wrote yourself is
+reported and left alone. The side benefit of turning it on is that turtles
+then also come back from chunk unloads and server restarts, not just
+updates.
+
+**Running it by hand**
+
+```
+updater                       check everything installed
+updater sweeper.lua           check just the one
+updater restore sweeper.lua   put the previous version back
+```
 
 ---
 
@@ -133,15 +227,23 @@ front throws your inventory on the floor and reports success.
 From the repository root:
 
 ```
-lua test/flattener_test.lua    # 13 cases
-lua test/sweeper_test.lua      # 12 cases
+lua test/flattener_test.lua    # 20 cases
+lua test/sweeper_test.lua      # 23 cases
+lua test/updater_test.lua      # 15 cases
 ```
 
-Twenty-five cases between them, covering coverage, containment, and the
-failure modes that cost real dirt: nothing dug below the start layer, nothing
-dug outside the footprint, the chest never mined, fuel never posted into the
-chest, nothing scattered on the ground, and a clean halt instead of a livelock
-when the chest fills.
+Fifty-eight cases between them, covering coverage, containment, and the failure
+modes that cost real dirt: nothing dug below the start layer, nothing dug
+outside the footprint, nothing vacuumed from outside it either, the chest never
+mined, nothing scattered on the ground, no litter abandoned on a cell the hold
+filled up on, a fuel reserve that is a reserve rather than a hoard, and a clean
+halt instead of a livelock when the chest fills.
+
+The harness also stubs a small computer around the turtle — an in-memory
+filesystem, an `http.get` served from a route table, and an `os.reboot` — so
+the self-update path is exercised end to end: a release published between two
+sweeper passes is installed and restarted into, from (0,0) with an empty hold,
+and a truncated one is refused while the turtle carries on working.
 
 The sweeper patrols for ever by design, so its suite caps each run with the
 harness's `sleepLimit`: the script is cut loose the moment it settles in for

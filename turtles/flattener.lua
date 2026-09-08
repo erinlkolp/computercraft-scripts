@@ -27,7 +27,22 @@
     - Everything at the turtle's layer and above, inside the area, gets mined.
     - Place a chest DIRECTLY BEHIND the turtle, on the turtle's own layer.
       An ender chest works well; a plain one will fill up on a big job.
-    - Give it coal or charcoal; it refuels itself and never dumps fuel.
+    - Give it coal or charcoal; it refuels itself and keeps FUEL_KEEP items
+      back as a reserve. Coal it mines beyond that is posted to the chest
+      like any other spoil, so a coal seam cannot fill all sixteen slots
+      with material it refuses to put down.
+
+  UPDATES
+    Optional. With lib/updater.lua installed alongside it, this program looks
+    for a newer version of itself at startup, before the first move, and
+    restarts into it. Without that file nothing changes. Startup only: a
+    one-shot job has no safe point in the middle, because the position below
+    is held in memory only and a turtle that rebooted partway through would
+    measure its next area from wherever it happened to be standing.
+
+    A restart only brings the turtle back up running if AUTOSTART is set. It
+    is off by default, because switching it on writes a startup.lua to the
+    computer. See VERSION and AUTOSTART in CONFIG below.
 
   RUN
     flattener
@@ -36,6 +51,12 @@
 -- ============================================================
 -- CONFIG
 -- ============================================================
+
+-- Bumping this is what rolls an update out to a fleet. See lib/updater.lua.
+local VERSION      = "1.0.0"
+local PROGRAM      = "flattener.lua" -- what we are installed as, for updates
+local AUTOSTART    = false -- set true to keep a startup.lua, so a turtle
+                          -- that reboots comes back up running this
 
 local WIDTH        = 15   -- columns (sideways, to the turtle's right)
 local LENGTH       = 15   -- rows (forward, the way the turtle starts facing)
@@ -48,6 +69,7 @@ local FUEL_MIN     = 200  -- top up when fuel drops below this
 local FUEL_MARGIN  = 16   -- keep at least this much on top of the trip home
 local MAX_STUCK    = 6    -- give up on a move after this many failed attempts
 local DIG_RETRY    = 8    -- re-digs per block, so gravel columns can't win
+local FUEL_KEEP    = 64   -- fuel items held back; the rest goes in the chest
 
 local FUEL_ITEMS = {
   ["minecraft:coal"]       = true,
@@ -276,18 +298,30 @@ local function dumpToChest()
     return 0, false
   end
 
-  local dumped, blocked = 0, false
+  -- Fuel is held back, but only FUEL_KEEP of it. A coal seam is ordinary
+  -- spoil, and treating every block of it as untouchable fuel is how a
+  -- turtle ends up with sixteen slots it refuses to put down, halfway
+  -- through a job it then abandons.
+  local dumped, blocked, kept = 0, false, 0
   for i = 1, 16 do
     local item = turtle.getItemDetail(i)
-    if item and not FUEL_ITEMS[item.name] then
-      turtle.select(i)
-      turtle.drop()
-      if turtle.getItemCount(i) == 0 then
-        dumped = dumped + 1
-      else
-        print("  ! Chest is full - holding the rest")
-        blocked = true
-        break
+    if item then
+      local count, keep = turtle.getItemCount(i), 0
+      if FUEL_ITEMS[item.name] and kept < FUEL_KEEP then
+        keep = math.min(count, FUEL_KEEP - kept)
+        kept = kept + keep
+      end
+
+      if keep < count then
+        turtle.select(i)
+        turtle.drop(count - keep)
+        if turtle.getItemCount(i) <= keep then
+          dumped = dumped + 1
+        else
+          print("  ! Chest is full - holding the rest")
+          blocked = true
+          break
+        end
       end
     end
   end
@@ -398,18 +432,79 @@ local function sweepLayer(z, backwards)
 end
 
 -- ============================================================
+-- SELF-UPDATE
+-- ============================================================
+
+-- lib/updater.lua if it happens to be installed. Optional on purpose: a
+-- turtle with nothing but this one file wget'd onto it still runs, it just
+-- never picks up a new version by itself.
+local function loadUpdater()
+  if type(fs) ~= "table" or type(fs.exists) ~= "function" then return nil end
+  for _, path in ipairs({ "updater.lua", "/updater.lua", "lib/updater.lua" }) do
+    if fs.exists(path) then
+      local ok, mod = pcall(dofile, path)
+      if ok and type(mod) == "table" and type(mod.check) == "function" then
+        return mod
+      end
+    end
+  end
+  return nil
+end
+
+-- Look for a newer copy of ourselves and restart into it.
+--
+-- ONLY EVER CALL THIS SOMEWHERE STOPPING IS FREE. Position is tracked in
+-- memory and nothing is written to disk, so a turtle that reboots mid-job
+-- wakes up believing it is back at (0,0) facing the way it started -- and
+-- would work the wrong patch of ground from there.
+local function updateCheck()
+  local upd = loadUpdater()
+  if not upd then return end
+
+  -- Only ever reboot if we know we will come back up running. A reboot with
+  -- no startup file drops the turtle to a prompt, which is a worse outcome
+  -- than working on with the version we already have.
+  local canRestart = false
+  if AUTOSTART then
+    local st, detail = upd.ensureStartup(PROGRAM)
+    canRestart = (st == "written" or st == "current")
+    if not canRestart then print("  ~ " .. tostring(detail)) end
+  end
+
+  local status, detail = upd.check(PROGRAM, VERSION)
+  if status == "updated" then
+    if canRestart then
+      print("Updated " .. tostring(detail) .. " - restarting.")
+      os.sleep(1)
+      os.reboot()
+    else
+      -- Installed, but staying put: it takes effect next time you start it.
+      print("Updated " .. tostring(detail) .. " - starts on the next run.")
+    end
+  elseif status == "rejected" then
+    print("! Update refused: " .. tostring(detail))
+  end
+end
+
+-- ============================================================
 -- MAIN
 -- ============================================================
 
 local function main()
   term.clear()
   term.setCursorPos(1, 1)
-  print("=== Turtle Flattener ===")
+  print("=== Turtle Flattener v" .. VERSION .. " ===")
   print("Area: " .. WIDTH .. " x " .. LENGTH .. "  (" .. (WIDTH * LENGTH) .. " cells)")
   print("Levelling to my current elevation. Nothing below it is touched.")
   print("Fuel: " .. tostring(turtle.getFuelLevel()))
   print("Chest expected directly behind. Ctrl+T to stop.")
   print("")
+
+  -- Safe: nothing has moved yet, so we are exactly where we were placed.
+  -- This is a one-shot job with no safe interior point, so it is the only
+  -- update check the flattener makes -- it picks up new versions when you
+  -- start a job, not during one.
+  updateCheck()
 
   refuelIfNeeded()
 
@@ -428,8 +523,10 @@ local function main()
     end
 
     -- Stop once this layer came up empty AND nothing was spotted overhead,
-    -- but never before SCAN_MIN layers have actually been walked.
-    if z + 1 >= SCAN_MIN and layerDigs == 0 and not sawAbove then
+    -- but never before SCAN_MIN layers have actually been walked. A cell we
+    -- could not reach is not a cell we know to be empty, so a layer with
+    -- skipped cells is never grounds for calling the job done.
+    if z + 1 >= SCAN_MIN and layerDigs == 0 and not sawAbove and skipped == 0 then
       print("Nothing left up here. Done.")
       break
     end

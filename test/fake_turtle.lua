@@ -13,6 +13,11 @@
   Scripts that patrol forever (sweeper) can be stopped cleanly with the
   sleepLimit option: the run ends the moment the script settles in for its
   nth patrol delay. Short retry backoffs do not count.
+
+  There is also a toy computer around the turtle: an in-memory filesystem,
+  an http.get served from a route table, and an os.reboot that unwinds the
+  script the way a real one would. That is enough to exercise a program that
+  downloads a new copy of itself and restarts into it.
 ]]
 
 local FakeTurtle = {}
@@ -46,12 +51,22 @@ function FakeTurtle.new(opts)
   self.opLimit   = opts.opLimit or 500000
   self.longSleeps = 0
   self.sleepLimit = opts.sleepLimit         -- nil = let it run forever
+
+  -- the computer the turtle is
+  self.files     = {}                       -- ["path"] = contents
+  self.routes    = {}                       -- ["url"]  = body (absent = offline)
+  self.requests  = {}                       -- urls asked for, in order
+  self.reboots   = 0
+  self.label     = opts.label
   return self
 end
 
 -- Raised to unwind a script that would otherwise patrol for ever. run()
 -- recognises it and reports a clean finish.
 FakeTurtle.STOP = "fake_turtle: stopped at sleep limit"
+
+-- Raised by os.reboot(). A real reboot never returns to the caller either.
+FakeTurtle.REBOOT = "fake_turtle: rebooted"
 
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
@@ -136,10 +151,15 @@ function FakeTurtle:suckFrom(x, y, z)
   return true
 end
 
--- A patrol loop only ends when we end it. Retry backoffs are well under a
--- second, so only a real patrol delay counts against the limit.
+-- How long a sleep has to be before it counts as "settling in for a patrol
+-- delay" rather than a pause. Retry backoffs are half a second and the beat
+-- before a reboot is one second; a patrol delay is measured in minutes.
+local LONG_SLEEP = 60
+
+-- A patrol loop only ends when we end it, so only a patrol-sized sleep counts
+-- against sleepLimit.
 function FakeTurtle:sleepFor(n)
-  if (n or 0) < 1 then return end
+  if (n or 0) < LONG_SLEEP then return end
   self.longSleeps = self.longSleeps + 1
   if self.sleepLimit and self.longSleeps >= self.sleepLimit then
     error(FakeTurtle.STOP, 0)
@@ -246,6 +266,88 @@ function FakeTurtle:breakAt(x, y, z)
   return true
 end
 
+-- ---------- the computer: files, http, reboot ----------
+
+-- "updater.lua", "/updater.lua" and "//updater.lua" are one file, the way
+-- they are on a real computer.
+local function path(p) return (tostring(p):gsub("^/+", "")) end
+
+function FakeTurtle:writeFile(p, contents)
+  self.files[path(p)] = contents
+end
+
+function FakeTurtle:readFile(p)
+  return self.files[path(p)]
+end
+
+-- Serve a URL. Any URL without a route behaves like the network being down.
+-- A function body is called with the request number, so a test can publish a
+-- new version partway through a run.
+function FakeTurtle:serve(url, body)
+  self.routes[url] = body
+end
+
+function FakeTurtle:fsApi()
+  local w = self
+  local fs = {}
+
+  fs.exists  = function(p) return w.files[path(p)] ~= nil end
+  fs.getSize = function(p) return #(w.files[path(p)] or "") end
+  fs.isDir   = function() return false end
+  fs.delete  = function(p) w.files[path(p)] = nil end
+
+  fs.move = function(from, to)
+    w.files[path(to)], w.files[path(from)] = w.files[path(from)], nil
+  end
+  fs.copy = function(from, to) w.files[path(to)] = w.files[path(from)] end
+
+  -- A write handle accumulates and commits on close, so a script that dies
+  -- mid-write leaves the old file alone -- which is what a real one does.
+  fs.open = function(p, mode)
+    local k = path(p)
+
+    if mode:find("r") then
+      local contents = w.files[k]
+      if not contents then return nil, "No such file" end
+      return {
+        readAll  = function() return contents end,
+        readLine = function() return contents:match("[^\n]*") end,
+        close    = function() end,
+      }
+    end
+
+    local parts = {}
+    if mode:find("a") and w.files[k] then parts[1] = w.files[k] end
+    return {
+      write     = function(text) parts[#parts + 1] = tostring(text) end,
+      writeLine = function(text) parts[#parts + 1] = tostring(text) .. "\n" end,
+      flush     = function() end,
+      close     = function() w.files[k] = table.concat(parts) end,
+    }
+  end
+
+  return fs
+end
+
+function FakeTurtle:httpApi()
+  local w = self
+  return {
+    get = function(url)
+      w:tick()
+      w.requests[#w.requests + 1] = url
+      local body = w.routes[url]
+      if type(body) == "function" then body = body(#w.requests) end
+      if body == nil then return nil, "Could not connect" end
+      return {
+        readAll         = function() return body end,
+        getResponseCode = function() return 200 end,
+        close           = function() end,
+      }
+    end,
+    checkURL = function() return true end,
+  }
+end
+
 -- ---------- the API the scripts see ----------
 
 function FakeTurtle:api()
@@ -310,7 +412,10 @@ function FakeTurtle:api()
     return moved > 0
   end
 
-  t.drop     = function(n) return dropInto(w:ahead()) and true or false end
+  t.drop     = function(n)
+    local x, y, z = w:ahead()
+    return dropInto(x, y, z, n)
+  end
   t.dropUp   = function(n) return dropInto(w.pos.x, w.pos.y, w.pos.z + 1, n) end
   t.dropDown = function(n) return dropInto(w.pos.x, w.pos.y, w.pos.z - 1, n) end
 
@@ -335,12 +440,23 @@ function FakeTurtle:api()
   return t
 end
 
+-- Memoised: every script and module in one world shares one environment, so
+-- a file the updater writes is a file the next loadfile() sees.
 function FakeTurtle:env()
+  if self._env then return self._env end
+
   local w = self
   local env = {}
 
-  local fakeOs = setmetatable({ sleep = function(n) w:sleepFor(n) end },
-                              { __index = os })
+  local fakeOs = setmetatable({
+    sleep  = function(n) w:sleepFor(n) end,
+    reboot = function()
+      w.reboots = w.reboots + 1
+      error(FakeTurtle.REBOOT, 0)
+    end,
+    getComputerLabel = function() return w.label end,
+    setComputerLabel = function(l) w.label = l end,
+  }, { __index = os })
   local fakeTerm = {
     clear = function() end,
     setCursorPos = function() end,
@@ -350,6 +466,27 @@ function FakeTurtle:env()
   env.turtle = self:api()
   env.os     = fakeOs
   env.term   = fakeTerm
+  env.fs     = self:fsApi()
+  env.http   = self:httpApi()
+
+  -- loadfile/dofile read the turtle's own disk, not the workstation's, so a
+  -- module has to have been installed on it to be loadable.
+  env.loadfile = function(p, mode, e)
+    local contents = w:readFile(p)
+    if not contents then return nil, p .. ": No such file" end
+    return load(contents, "@" .. tostring(p), mode or "t", e or w:env())
+  end
+  env.dofile = function(p)
+    local chunk, err = env.loadfile(p)
+    if not chunk then error(err, 0) end
+    return chunk()
+  end
+
+  env.shell = {
+    run               = function() return true end,
+    resolve           = function(p) return p end,
+    getRunningProgram = function() return w.runningProgram or "shell" end,
+  }
   env.sleep  = function(n) w:sleepFor(n) end
   env.print  = function(...)
     local parts = {}
@@ -375,16 +512,46 @@ function FakeTurtle:env()
   }
 
   env._G = env
-  return setmetatable(env, { __index = _G })
+  self._env = setmetatable(env, { __index = _G })
+  return self._env
+end
+
+-- Load a module off the WORKSTATION (this repo) into the turtle's world, the
+-- way `wget`ing it onto the computer would. Returns whatever it returns.
+function FakeTurtle:install(diskPath, asName)
+  local f = assert(io.open(diskPath, "r"))
+  local contents = f:read("*a")
+  f:close()
+  self:writeFile(asName or diskPath:match("[^/]+$"), contents)
+  return contents
+end
+
+function FakeTurtle:loadInstalled(name)
+  local chunk, err = self:env().loadfile(name)
+  if not chunk then error(err, 0) end
+  return chunk()
+end
+
+-- Run a program from source. Lets a test flip a config constant the program
+-- has no runtime setting for, and run the result.
+function FakeTurtle:runSource(src, chunkName)
+  local chunk, err = load(src, "@" .. (chunkName or "program"), "t", self:env())
+  if not chunk then return false, err end
+  local ok, runErr = pcall(chunk)
+  -- Cutting a patrol loop short on purpose is a finish, not a failure, and
+  -- neither is a reboot: both unwind the script by design.
+  if not ok and (runErr == FakeTurtle.STOP or runErr == FakeTurtle.REBOOT) then
+    return true, nil
+  end
+  return ok, runErr
 end
 
 function FakeTurtle:run(path)
-  local chunk, err = loadfile(path, "t", self:env())
-  if not chunk then return false, err end
-  local ok, runErr = pcall(chunk)
-  -- Cutting a patrol loop short on purpose is a finish, not a failure.
-  if not ok and runErr == FakeTurtle.STOP then return true, nil end
-  return ok, runErr
+  local f = io.open(path, "r")
+  if not f then return false, path .. ": No such file" end
+  local src = f:read("*a")
+  f:close()
+  return self:runSource(src, path)
 end
 
 function FakeTurtle:logText()
